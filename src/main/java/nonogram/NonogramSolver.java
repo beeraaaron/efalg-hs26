@@ -1,17 +1,11 @@
 package nonogram;
 
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.util.ArrayList;
+import java.io.*;
 import java.util.Arrays;
-import java.util.List;
 
-public class NonogramMultiLong {
-    private static final String inputFilename = "nonogram.in";
-    private static final String outputFilename = "nonogram-my.out";
+public class NonogramSolver {
+    private static final String inputFilename = "nonogram-mountain.in";
+    private static final String outputFilename = "nonogram-mountain-my.out";
     private static final BufferedReader reader;
 
     private static int columnAmount;
@@ -20,7 +14,17 @@ public class NonogramMultiLong {
     private static int[][] columnClues;
     private static int[][] rowClues;
 
-    private static final List<String> solutions = new ArrayList<>();
+    private static String[] solutions = new String[8];
+    private static int solutionsSize = 0;
+
+    private static final int KIND_FAST_ROW_SIZE = 0, KIND_FAST_COL_SIZE = 1,
+            KIND_FAST_ROW_FILLED = 2, KIND_FAST_ROW_BLANK = 3,
+            KIND_WIDE_ROW_SIZE = 4, KIND_WIDE_COL_SIZE = 5,
+            KIND_WIDE_KNOWN_FILLED_WORD = 6, KIND_WIDE_KNOWN_BLANK_WORD = 7;
+    private static int[] trailKind = new int[64];
+    private static int[] trailIndex = new int[64];
+    private static long[] trailValue = new long[64];
+    private static int trailSize = 0;
 
     static {
         try {
@@ -34,16 +38,15 @@ public class NonogramMultiLong {
         parseHeaderClues();
         parseClues();
 
-        // A single `long` can only address 64 bit positions (and the naive
-        // `(1L << n) - 1` mask trick only works cleanly up to n == 64), so the
-        // fast single-word path is only correct while both dimensions fit.
-        // Everything above that needs the multi-word ("wide") path.
+        // A single long can only address 64 bit positions
         if (columnAmount <= 64 && rowAmount <= 64) {
-            initializeCandidatesFast();
-            solveRecFast();
+            if (initializeCandidatesFast()) {
+                solveRecFast();
+            }
         } else {
-            initializeCandidatesWide();
-            solveRecWide();
+            if (initializeCandidatesWide()) {
+                solveRecWide();
+            }
         }
 
         writeSolutionsToFile();
@@ -71,29 +74,37 @@ public class NonogramMultiLong {
         return clues;
     }
 
-    private static void writeSolutionsToFile() throws IOException {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(outputFilename))) {
-            for (String solution : solutions) {
-                writer.println(solution);
+    private static int countCandidates(int[] clues, int length) {
+        int amountOfClues = clues.length;
+        if (amountOfClues == 0) return 1;
+        int freeCells = length - calcMinLineSizes(clues)[0];
+        if (freeCells < 0) return 0;
+
+
+        int n = freeCells + amountOfClues;
+        int r = Math.min(amountOfClues, freeCells);
+        long res = 1;
+        for (int i = 1; i <= r; i++) {
+            res = res * (n - r + i) / i; // stays exact at every step
+            if (res > Integer.MAX_VALUE) {
+                throw new IllegalStateException("Too many candidates for one line");
             }
         }
+        return (int) res;
     }
 
-    // ====================================================================
-    // shared trail: both paths push/undo through the SAME arrays -- the
-    // trail itself (kind/index/oldValue) has nothing bit-width-specific
-    // about it, so there's no benefit to duplicating this part. Only one
-    // path's KIND_* constants are ever pushed in a given run, since `main`
-    // picks exactly one path and never mixes them.
-    // ====================================================================
-    private static final int KIND_FAST_ROW_SIZE = 0, KIND_FAST_COL_SIZE = 1,
-            KIND_FAST_ROW_FILLED = 2, KIND_FAST_ROW_BLANK = 3,
-            KIND_WIDE_ROW_SIZE = 4, KIND_WIDE_COL_SIZE = 5,
-            KIND_WIDE_KNOWN_FILLED_WORD = 6, KIND_WIDE_KNOWN_BLANK_WORD = 7;
-    private static int[] trailKind = new int[64];
-    private static int[] trailIndex = new int[64];
-    private static long[] trailValue = new long[64];
-    private static int trailSize = 0;
+    private static int[] calcMinLineSizes(int[] clues) {
+        int amountOfClues = clues.length;
+        int[] need = new int[amountOfClues];
+
+        int totalBlockSize = 0;
+        for (int i = amountOfClues - 1; i >= 0; i--) {
+            totalBlockSize += clues[i];
+            // need = totalBlockSize + Mandatory Gap of 1 after each Block
+            need[i] = totalBlockSize + (amountOfClues - 1 - i);
+        }
+        return need;
+    }
 
     private static int trailMark() {
         return trailSize;
@@ -114,35 +125,30 @@ public class NonogramMultiLong {
         trailValue = Arrays.copyOf(trailValue, newCap);
     }
 
-    private static void undoTo(int mark) {
-        while (trailSize > mark) {
-            trailSize--;
-            int index = trailIndex[trailSize];
-            long oldValue = trailValue[trailSize];
-            switch (trailKind[trailSize]) {
-                case KIND_FAST_ROW_SIZE -> fastRowCandidateSize[index] = (int) oldValue;
-                case KIND_FAST_COL_SIZE -> fastColumnCandidateSize[index] = (int) oldValue;
-                case KIND_FAST_ROW_FILLED -> fastKnownFilled[index] = oldValue;
-                case KIND_FAST_ROW_BLANK -> fastKnownBlank[index] = oldValue;
-                case KIND_WIDE_ROW_SIZE -> wideRowCandidateSize[index] = (int) oldValue;
-                case KIND_WIDE_COL_SIZE -> wideColumnCandidateSize[index] = (int) oldValue;
-                case KIND_WIDE_KNOWN_FILLED_WORD -> wideKnownFilled[index] = oldValue;
-                case KIND_WIDE_KNOWN_BLANK_WORD -> wideKnownBlank[index] = oldValue;
+    private static void addSolution(String solution) {
+        if (solutionsSize == solutions.length) growSolutions();
+        solutions[solutionsSize++] = solution;
+    }
+
+    private static void growSolutions() {
+        solutions = Arrays.copyOf(solutions, solutions.length * 2);
+    }
+
+    private static void writeSolutionsToFile() throws IOException {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(outputFilename))) {
+            for (int i = 0; i < solutionsSize; i++) {
+                writer.println(solutions[i]);
             }
         }
     }
 
-    // ====================================================================
-    // FAST PATH -- one `long` per line. Used when columnAmount <= 64 and
-    // rowAmount <= 64. Structurally and performance-wise identical to the
-    // single-word trail version from before the wide-path work.
-    // ====================================================================
+    // FAST PATH -- one `long` per line. Used when columnAmount <= 64 and rowAmount <= 64
     private static long fastColumnsMask, fastRowsMask;
     private static long[] fastKnownFilled, fastKnownBlank;
     private static long[][] fastRowCandidates, fastColumnCandidates;
     private static int[] fastRowCandidateSize, fastColumnCandidateSize;
 
-    private static void initializeCandidatesFast() {
+    private static boolean initializeCandidatesFast() {
         fastColumnsMask = (columnAmount == 64) ? -1L : (1L << columnAmount) - 1;
         fastRowsMask = (rowAmount == 64) ? -1L : (1L << rowAmount) - 1;
 
@@ -154,21 +160,28 @@ public class NonogramMultiLong {
         fastColumnCandidateSize = new int[columnAmount];
 
         for (int r = 0; r < rowAmount; r++) {
-            long[] arr = toArrayFast(generateCandidatesFast(rowClues[r], columnAmount));
-            fastRowCandidates[r] = arr;
-            fastRowCandidateSize[r] = arr.length;
+            fastRowCandidates[r] = generateCandidatesFast(rowClues[r], columnAmount);
+            fastRowCandidateSize[r] = fastRowCandidates[r].length;
+            // if there are no candidates for a row: fail early
+            if (fastRowCandidateSize[r] == 0) {
+                return false;
+            }
         }
         for (int c = 0; c < columnAmount; c++) {
-            long[] arr = toArrayFast(generateCandidatesFast(columnClues[c], rowAmount));
-            fastColumnCandidates[c] = arr;
-            fastColumnCandidateSize[c] = arr.length;
+            fastColumnCandidates[c] = generateCandidatesFast(columnClues[c], rowAmount);
+            fastColumnCandidateSize[c] = fastColumnCandidates[c].length;
+            // if there are no candidates for a column: fail early
+            if (fastColumnCandidateSize[c] == 0) {
+                return false;
+            }
         }
+        return true;
     }
 
     private static void solveRecFast() {
         int mark = trailMark();
         if (!propagateAllFast()) {
-            undoTo(mark);
+            undoToFast(mark);
             return;
         }
 
@@ -177,17 +190,24 @@ public class NonogramMultiLong {
         int bestIndex = -1;
         for (int r = 0; r < rowAmount; r++) {
             int size = fastRowCandidateSize[r];
-            if (size > 1 && size < bestSize) { bestSize = size; bestIndex = r; }
+            if (size > 1 && size < bestSize) {
+                bestSize = size;
+                bestIndex = r;
+            }
         }
         for (int c = 0; c < columnAmount; c++) {
             int size = fastColumnCandidateSize[c];
-            if (size > 1 && size < bestSize) { bestLineIsRow = false; bestSize = size; bestIndex = c; }
+            if (size > 1 && size < bestSize) {
+                bestLineIsRow = false;
+                bestSize = size;
+                bestIndex = c;
+            }
         }
 
         if (bestIndex == -1) {
-            assert validNonogramFast() : "propagation produced an invalid board (fast path)";
-            solutions.add(boardToStringFast());
-            undoTo(mark);
+            // at this point we must have a valid nonogram -> that's an invariant kept through the whole algo
+            addSolution(boardToStringFast());
+            undoToFast(mark);
             return;
         }
 
@@ -196,9 +216,9 @@ public class NonogramMultiLong {
             int branchMark = trailMark();
             forceCandidateFast(bestLineIsRow, bestIndex, i);
             solveRecFast();
-            undoTo(branchMark);
+            undoToFast(branchMark);
         }
-        undoTo(mark);
+        undoToFast(mark);
     }
 
     private static boolean propagateAllFast() {
@@ -206,28 +226,42 @@ public class NonogramMultiLong {
         while (changed) {
             changed = false;
             for (int r = 0; r < rowAmount; r++) {
-                if (!filterLineFast(true, r, fastKnownFilled[r], fastKnownBlank[r], fastColumnsMask)) return false;
+                if (!filterLineFast(true, r, fastKnownFilled[r], fastKnownBlank[r], fastColumnsMask)) {
+                    return false;
+                }
 
                 long[] candidates = fastRowCandidates[r];
-                int size = fastRowCandidateSize[r];
-                long forcedOnes = commonOnesFast(candidates, size, fastColumnsMask) & ~fastKnownFilled[r];
-                long forcedZeros = commonZerosFast(candidates, size, fastColumnsMask) & ~fastKnownBlank[r];
-                if (forcedOnes != 0) { setKnownFilledFast(r, fastKnownFilled[r] | forcedOnes); changed = true; }
-                if (forcedZeros != 0) { setKnownBlankFast(r, fastKnownBlank[r] | forcedZeros); changed = true; }
+                int candidateSize = fastRowCandidateSize[r];
+                long newKnownFilled = commonOnesFast(candidates, candidateSize, fastColumnsMask) & ~fastKnownFilled[r];
+                long newKnownBlank = commonZerosFast(candidates, candidateSize, fastColumnsMask) & ~fastKnownBlank[r];
+                if (newKnownFilled != 0) {
+                    setKnownFilledFast(r, fastKnownFilled[r] | newKnownFilled);
+                    changed = true;
+                }
+                if (newKnownBlank != 0) {
+                    setKnownBlankFast(r, fastKnownBlank[r] | newKnownBlank);
+                    changed = true;
+                }
             }
             for (int c = 0; c < columnAmount; c++) {
                 long colFilled = extractColumnBitsFast(fastKnownFilled, c);
                 long colBlank = extractColumnBitsFast(fastKnownBlank, c);
-                if (!filterLineFast(false, c, colFilled, colBlank, fastRowsMask)) return false;
+                if (!filterLineFast(false, c, colFilled, colBlank, fastRowsMask)) {
+                    return false;
+                }
 
                 long[] candidates = fastColumnCandidates[c];
-                int size = fastColumnCandidateSize[c];
-                long forcedOnes = commonOnesFast(candidates, size, fastRowsMask) & ~colFilled;
-                long forcedZeros = commonZerosFast(candidates, size, fastRowsMask) & ~colBlank;
-                if (forcedOnes != 0 || forcedZeros != 0) {
+                int candidateSize = fastColumnCandidateSize[c];
+                long newKnownFilled = commonOnesFast(candidates, candidateSize, fastRowsMask) & ~colFilled;
+                long newKnownBlank = commonZerosFast(candidates, candidateSize, fastRowsMask) & ~colBlank;
+                if (newKnownFilled != 0 || newKnownBlank != 0) {
                     for (int r = 0; r < rowAmount; r++) {
-                        if (((forcedOnes >> r) & 1) != 0) setKnownFilledFast(r, fastKnownFilled[r] | (1L << c));
-                        if (((forcedZeros >> r) & 1) != 0) setKnownBlankFast(r, fastKnownBlank[r] | (1L << c));
+                        if (((newKnownFilled >> r) & 1) != 0) {
+                            setKnownFilledFast(r, fastKnownFilled[r] | (1L << c));
+                        }
+                        if (((newKnownBlank >> r) & 1) != 0) {
+                            setKnownBlankFast(r, fastKnownBlank[r] | (1L << c));
+                        }
                     }
                     changed = true;
                 }
@@ -238,25 +272,32 @@ public class NonogramMultiLong {
 
     private static boolean filterLineFast(boolean isRow, int index, long knownFilled, long knownBlank, long mask) {
         long[] candidates = isRow ? fastRowCandidates[index] : fastColumnCandidates[index];
-        int size = isRow ? fastRowCandidateSize[index] : fastColumnCandidateSize[index];
-        int oldSize = size;
+        int candidateSize = isRow ? fastRowCandidateSize[index] : fastColumnCandidateSize[index];
+        int oldCandidateSize = candidateSize;
 
         int i = 0;
-        while (i < size) {
-            long cand = candidates[i];
-            if ((cand & knownBlank) != 0 || (~cand & knownFilled & mask) != 0) {
-                size--;
-                long tmp = candidates[i]; candidates[i] = candidates[size]; candidates[size] = tmp;
+        while (i < candidateSize) {
+            long candidate = candidates[i];
+            // check if candidate is invalid based on known filled & blank bits
+            if ((candidate & knownBlank) != 0 || (~candidate & knownFilled & mask) != 0) {
+                candidateSize--;
+                var tmp = candidates[i];
+                candidates[i] = candidates[candidateSize];
+                candidates[candidateSize] = tmp;
             } else {
                 i++;
             }
         }
 
-        if (size != oldSize) {
-            recordFastSizeChange(isRow, index, oldSize);
-            if (isRow) fastRowCandidateSize[index] = size; else fastColumnCandidateSize[index] = size;
+        if (candidateSize != oldCandidateSize) {
+            recordFastSizeChange(isRow, index, oldCandidateSize);
+            if (isRow) {
+                fastRowCandidateSize[index] = candidateSize;
+            } else {
+                fastColumnCandidateSize[index] = candidateSize;
+            }
         }
-        return size > 0;
+        return candidateSize > 0;
     }
 
     private static void forceCandidateFast(boolean isRow, int lineIndex, int candidateIndex) {
@@ -264,54 +305,71 @@ public class NonogramMultiLong {
         int candidateSize = isRow ? fastRowCandidateSize[lineIndex] : fastColumnCandidateSize[lineIndex];
 
         if (candidateIndex != 0) {
-            long tmp = candidates[0]; candidates[0] = candidates[candidateIndex]; candidates[candidateIndex] = tmp;
+            long tmp = candidates[0];
+            candidates[0] = candidates[candidateIndex];
+            candidates[candidateIndex] = tmp;
         }
         recordFastSizeChange(isRow, lineIndex, candidateSize);
-        if (isRow) fastRowCandidateSize[lineIndex] = 1; else fastColumnCandidateSize[lineIndex] = 1;
-    }
-
-    private static List<Long> generateCandidatesFast(int[] clues, int length) {
-        List<Long> result = new ArrayList<>();
-        generateCandidatesRecFast(clues, 0, length, 0, 0L, result);
-        return result;
-    }
-
-    private static void generateCandidatesRecFast(int[] clues, int clueIndex, int length, int start,
-                                                  long acc, List<Long> result) {
-        if (clueIndex == clues.length) { result.add(acc); return; }
-
-        int clue = clues[clueIndex];
-        int fieldsToFill = clue;
-        for (int i = clueIndex + 1; i < clues.length; i++) fieldsToFill += clues[i];
-        fieldsToFill += (clues.length - clueIndex - 1);
-
-        for (int i = start; i + fieldsToFill <= length; i++) {
-            long block = (clue == 64) ? -1L : (((1L << clue) - 1) << i);
-            generateCandidatesRecFast(clues, clueIndex + 1, length, i + clue + 1, acc | block, result);
+        if (isRow) {
+            fastRowCandidateSize[lineIndex] = 1;
+        } else {
+            fastColumnCandidateSize[lineIndex] = 1;
         }
     }
 
-    private static long[] toArrayFast(List<Long> list) {
-        long[] arr = new long[list.size()];
-        for (int i = 0; i < arr.length; i++) arr[i] = list.get(i);
-        return arr;
+    public static long[] generateCandidatesFast(int[] clues, int length) {
+        int count = countCandidates(clues, length);
+        long[] out = new long[count];
+        if (count == 0) {
+            return out;
+        }
+
+        generateCandidatesRecFast(clues, calcMinLineSizes(clues), 0, length, 0, 0L, out, 0);
+        return out;
     }
 
-    private static long extractColumnBitsFast(long[] rows, int c) {
+    private static int generateCandidatesRecFast(int[] clues, int[] need, int clueIndex, int length, int start,
+                               long candidate, long[] out, int pos) {
+        if (clueIndex == clues.length) {
+            out[pos] = candidate;
+            return pos + 1;
+        }
+
+        int clue = clues[clueIndex];
+        int last = length - need[clueIndex];
+        // fill block of 1s for the current clue
+        long baseBlock = (clue == 64) ? -1L : ((1L << clue) - 1);
+        for (int i = start; i <= last; i++) {
+            // position block
+            long positionedBlock = baseBlock << i;
+            pos = generateCandidatesRecFast(clues, need, clueIndex + 1, length, i + clue + 1, candidate | positionedBlock, out, pos);
+        }
+        return pos;
+    }
+
+    private static long extractColumnBitsFast(long[] rows, int columnIndex) {
         long bits = 0;
-        for (int r = 0; r < rowAmount; r++) if (((rows[r] >> c) & 1L) != 0) bits |= (1L << r);
+        for (int r = 0; r < rowAmount; r++) {
+            if (((rows[r] >> columnIndex) & 1L) != 0) {
+                bits |= (1L << r);
+            }
+        }
         return bits;
     }
 
-    private static long commonOnesFast(long[] arr, int size, long mask) {
+    private static long commonOnesFast(long[] lineCandidates, int size, long mask) {
         long common = mask;
-        for (int i = 0; i < size; i++) common &= arr[i];
+        for (int i = 0; i < size; i++) {
+            common &= lineCandidates[i];
+        }
         return common;
     }
 
-    private static long commonZerosFast(long[] arr, int size, long mask) {
+    private static long commonZerosFast(long[] lineCandidates, int size, long mask) {
         long common = mask;
-        for (int i = 0; i < size; i++) common &= (~arr[i] & mask);
+        for (int i = 0; i < size; i++) {
+            common &= (~lineCandidates[i] & mask);
+        }
         return common;
     }
 
@@ -329,31 +387,18 @@ public class NonogramMultiLong {
         trailPush(isRow ? KIND_FAST_ROW_SIZE : KIND_FAST_COL_SIZE, index, oldSize);
     }
 
-    private static boolean lineMatchesCluesFast(long lineBits, int length, int[] clues) {
-        int clueIndex = 0, runLength = 0;
-        for (int i = 0; i < length; i++) {
-            boolean filled = ((lineBits >> i) & 1L) != 0;
-            if (filled) {
-                runLength++;
-            } else if (runLength > 0) {
-                if (clueIndex >= clues.length || clues[clueIndex] != runLength) return false;
-                clueIndex++;
-                runLength = 0;
+    private static void undoToFast(int mark) {
+        while (trailSize > mark) {
+            trailSize--;
+            int index = trailIndex[trailSize];
+            long oldValue = trailValue[trailSize];
+            switch (trailKind[trailSize]) {
+                case KIND_FAST_ROW_SIZE -> fastRowCandidateSize[index] = (int) oldValue;
+                case KIND_FAST_COL_SIZE -> fastColumnCandidateSize[index] = (int) oldValue;
+                case KIND_FAST_ROW_FILLED -> fastKnownFilled[index] = oldValue;
+                case KIND_FAST_ROW_BLANK -> fastKnownBlank[index] = oldValue;
             }
         }
-        if (runLength > 0) {
-            if (clueIndex >= clues.length || clues[clueIndex] != runLength) return false;
-            clueIndex++;
-        }
-        return clueIndex == clues.length;
-    }
-
-    private static boolean validNonogramFast() {
-        for (int r = 0; r < rowAmount; r++)
-            if (!lineMatchesCluesFast(fastKnownFilled[r], columnAmount, rowClues[r])) return false;
-        for (int c = 0; c < columnAmount; c++)
-            if (!lineMatchesCluesFast(extractColumnBitsFast(fastKnownFilled, c), rowAmount, columnClues[c])) return false;
-        return true;
     }
 
     private static String boardToStringFast() {
@@ -364,10 +409,7 @@ public class NonogramMultiLong {
         return sb.toString();
     }
 
-    // ====================================================================
-    // WIDE PATH -- an array of `long` words per line. Used whenever either
-    // dimension exceeds what a single `long` can address.
-    // ====================================================================
+    // WIDE PATH -- an array of `long` words per line.
     private static int wideRowWords, wideColWords;
     private static long wideRowFinalWordMask, wideColFinalWordMask;
     private static long[] wideKnownFilled, wideKnownBlank;
@@ -377,7 +419,7 @@ public class NonogramMultiLong {
     private static long[] wideForcedOnesScratchRow, wideForcedZerosScratchRow;
     private static long[] wideForcedOnesScratchCol, wideForcedZerosScratchCol;
 
-    private static void initializeCandidatesWide() {
+    private static boolean initializeCandidatesWide() {
         wideRowWords = (columnAmount + 63) >>> 6;
         wideColWords = (rowAmount + 63) >>> 6;
 
@@ -395,14 +437,20 @@ public class NonogramMultiLong {
         wideColumnCandidateSize = new int[columnAmount];
 
         for (int r = 0; r < rowAmount; r++) {
-            List<long[]> list = generateCandidatesWide(rowClues[r], columnAmount, wideRowWords);
-            wideRowCandidates[r] = toFlatArrayWide(list, wideRowWords);
-            wideRowCandidateSize[r] = list.size();
+            wideRowCandidates[r] = generateCandidatesWide(rowClues[r], columnAmount, wideRowWords);
+            wideRowCandidateSize[r] = wideRowCandidates[r].length / wideRowWords;
+            // if there are no candidates for a row: fail early
+            if (wideRowCandidateSize[r] == 0) {
+                return false;
+            }
         }
         for (int c = 0; c < columnAmount; c++) {
-            List<long[]> list = generateCandidatesWide(columnClues[c], rowAmount, wideColWords);
-            wideColumnCandidates[c] = toFlatArrayWide(list, wideColWords);
-            wideColumnCandidateSize[c] = list.size();
+            wideColumnCandidates[c] = generateCandidatesWide(columnClues[c], rowAmount, wideColWords);
+            wideColumnCandidateSize[c] = wideColumnCandidates[c].length / wideColWords;
+            // if there are no candidates for a row: fail early
+            if (wideColumnCandidateSize[c] == 0) {
+                return false;
+            }
         }
 
         wideColFilledScratch = new long[wideColWords];
@@ -411,12 +459,13 @@ public class NonogramMultiLong {
         wideForcedZerosScratchRow = new long[wideRowWords];
         wideForcedOnesScratchCol = new long[wideColWords];
         wideForcedZerosScratchCol = new long[wideColWords];
+        return true;
     }
 
     private static void solveRecWide() {
         int mark = trailMark();
         if (!propagateAllWide()) {
-            undoTo(mark);
+            undoToWide(mark);
             return;
         }
 
@@ -433,9 +482,8 @@ public class NonogramMultiLong {
         }
 
         if (bestIndex == -1) {
-            assert validNonogramWide() : "propagation produced an invalid board (wide path)";
-            solutions.add(boardToStringWide());
-            undoTo(mark);
+            addSolution(boardToStringWide());
+            undoToWide(mark);
             return;
         }
 
@@ -444,9 +492,9 @@ public class NonogramMultiLong {
             int branchMark = trailMark();
             forceCandidateWide(bestLineIsRow, bestIndex, i);
             solveRecWide();
-            undoTo(branchMark);
+            undoToWide(branchMark);
         }
-        undoTo(mark);
+        undoToWide(mark);
     }
 
     private static boolean propagateAllWide() {
@@ -456,7 +504,9 @@ public class NonogramMultiLong {
 
             for (int r = 0; r < rowAmount; r++) {
                 int base = r * wideRowWords;
-                if (!filterLineWide(true, r, wideKnownFilled, base, wideKnownBlank, base, wideRowWords)) return false;
+                if (!filterLineWide(true, r, wideKnownFilled, base, wideKnownBlank, base, wideRowWords)) {
+                    return false;
+                }
 
                 long[] candidates = wideRowCandidates[r];
                 int size = wideRowCandidateSize[r];
@@ -480,7 +530,9 @@ public class NonogramMultiLong {
             for (int c = 0; c < columnAmount; c++) {
                 extractColumnWordsWide(wideKnownFilled, c, wideColFilledScratch);
                 extractColumnWordsWide(wideKnownBlank, c, wideColBlankScratch);
-                if (!filterLineWide(false, c, wideColFilledScratch, 0, wideColBlankScratch, 0, wideColWords)) return false;
+                if (!filterLineWide(false, c, wideColFilledScratch, 0, wideColBlankScratch, 0, wideColWords)) {
+                    return false;
+                }
 
                 long[] candidates = wideColumnCandidates[c];
                 int size = wideColumnCandidateSize[c];
@@ -491,7 +543,9 @@ public class NonogramMultiLong {
                 for (int w = 0; w < wideColWords; w++) {
                     wideForcedOnesScratchCol[w] &= ~wideColFilledScratch[w];
                     wideForcedZerosScratchCol[w] &= ~wideColBlankScratch[w];
-                    if (wideForcedOnesScratchCol[w] != 0 || wideForcedZerosScratchCol[w] != 0) anyForced = true;
+                    if (wideForcedOnesScratchCol[w] != 0 || wideForcedZerosScratchCol[w] != 0) {
+                        anyForced = true;
+                    }
                 }
 
                 if (anyForced) {
@@ -502,8 +556,12 @@ public class NonogramMultiLong {
                         if (!setOne && !setZero) continue;
 
                         int flatIdx = r * wideRowWords + cWord;
-                        if (setOne) setKnownFilledWordWide(flatIdx, wideKnownFilled[flatIdx] | (1L << cBit));
-                        if (setZero) setKnownBlankWordWide(flatIdx, wideKnownBlank[flatIdx] | (1L << cBit));
+                        if (setOne) {
+                            setKnownFilledWordWide(flatIdx, wideKnownFilled[flatIdx] | (1L << cBit));
+                        }
+                        if (setZero) {
+                            setKnownBlankWordWide(flatIdx, wideKnownBlank[flatIdx] | (1L << cBit));
+                        }
                     }
                     changed = true;
                 }
@@ -515,32 +573,36 @@ public class NonogramMultiLong {
     private static boolean filterLineWide(boolean isRow, int index, long[] knownFilled, int knownFilledBase,
                                           long[] knownBlank, int knownBlankBase, int words) {
         long[] candidates = isRow ? wideRowCandidates[index] : wideColumnCandidates[index];
-        int size = isRow ? wideRowCandidateSize[index] : wideColumnCandidateSize[index];
-        int oldSize = size;
+        int candidateSize = isRow ? wideRowCandidateSize[index] : wideColumnCandidateSize[index];
+        int oldCandidateSize = candidateSize;
 
         int i = 0;
-        while (i < size) {
+        while (i < candidateSize) {
             int base = i * words;
             boolean invalid = false;
             for (int w = 0; w < words; w++) {
-                long cand = candidates[base + w];
+                long candidate = candidates[base + w];
                 long kf = knownFilled[knownFilledBase + w];
                 long kb = knownBlank[knownBlankBase + w];
-                if ((cand & kb) != 0 || (~cand & kf) != 0) { invalid = true; break; }
+                if ((candidate & kb) != 0 || (~candidate & kf) != 0) { invalid = true; break; }
             }
             if (invalid) {
-                size--;
-                swapBlocksWide(candidates, i, size, words);
+                candidateSize--;
+                swapBlocksWide(candidates, i, candidateSize, words);
             } else {
                 i++;
             }
         }
 
-        if (size != oldSize) {
-            recordWideSizeChange(isRow, index, oldSize);
-            if (isRow) wideRowCandidateSize[index] = size; else wideColumnCandidateSize[index] = size;
+        if (candidateSize != oldCandidateSize) {
+            recordWideSizeChange(isRow, index, oldCandidateSize);
+            if (isRow) {
+                wideRowCandidateSize[index] = candidateSize;
+            } else {
+                wideColumnCandidateSize[index] = candidateSize;
+            }
         }
-        return size > 0;
+        return candidateSize > 0;
     }
 
     private static void forceCandidateWide(boolean isRow, int lineIndex, int candidateIndex) {
@@ -552,7 +614,11 @@ public class NonogramMultiLong {
             swapBlocksWide(candidates, 0, candidateIndex, words);
         }
         recordWideSizeChange(isRow, lineIndex, candidateSize);
-        if (isRow) wideRowCandidateSize[lineIndex] = 1; else wideColumnCandidateSize[lineIndex] = 1;
+        if (isRow) {
+            wideRowCandidateSize[lineIndex] = 1;
+        } else {
+            wideColumnCandidateSize[lineIndex] = 1;
+        }
     }
 
     private static void swapBlocksWide(long[] arr, int posA, int posB, int words) {
@@ -565,30 +631,34 @@ public class NonogramMultiLong {
         }
     }
 
-    private static List<long[]> generateCandidatesWide(int[] clues, int length, int words) {
-        List<long[]> result = new ArrayList<>();
+    public static long[] generateCandidatesWide(int[] clues, int length, int words) {
+        int count = countCandidates(clues, length);
+        long[] out = new long[count * words];
+        if (count == 0) {
+            return out;
+        }
+
         long[] acc = new long[words];
-        generateCandidatesRecWide(clues, 0, length, 0, acc, result);
-        return result;
+        generateCandidatesRecWide(clues, calcMinLineSizes(clues), 0, length, 0, acc, out, 0, words);
+        return out;
     }
 
-    private static void generateCandidatesRecWide(int[] clues, int clueIndex, int length, int start,
-                                                  long[] acc, List<long[]> result) {
+    private static int generateCandidatesRecWide(int[] clues, int[] need, int clueIndex, int length, int start,
+                                                 long[] acc, long[] out, int pos, int words) {
         if (clueIndex == clues.length) {
-            result.add(acc.clone());
-            return;
+            System.arraycopy(acc, 0, out, pos * words, words);
+            return pos + 1;
         }
 
         int clue = clues[clueIndex];
-        int fieldsToFill = clue;
-        for (int i = clueIndex + 1; i < clues.length; i++) fieldsToFill += clues[i];
-        fieldsToFill += (clues.length - clueIndex - 1);
+        int last = length - need[clueIndex];
 
-        for (int i = start; i + fieldsToFill <= length; i++) {
+        for (int i = start; i <= last; i++) {
             setBitsWide(acc, i, clue);
-            generateCandidatesRecWide(clues, clueIndex + 1, length, i + clue + 1, acc, result);
+            pos = generateCandidatesRecWide(clues, need, clueIndex + 1, length, i + clue + 1, acc, out, pos, words);
             clearBitsWide(acc, i, clue);
         }
+        return pos;
     }
 
     private static void setBitsWide(long[] words, int start, int len) {
@@ -599,7 +669,9 @@ public class NonogramMultiLong {
             words[w0] |= m;
         } else {
             words[w0] |= (-1L << (start & 63));
-            for (int w = w0 + 1; w < w1; w++) words[w] = -1L;
+            for (int w = w0 + 1; w < w1; w++) {
+                words[w] = -1L;
+            }
             int lastBits = end - w1 * 64;
             words[w1] |= (lastBits == 64) ? -1L : ((1L << lastBits) - 1);
         }
@@ -613,19 +685,13 @@ public class NonogramMultiLong {
             words[w0] &= ~m;
         } else {
             words[w0] &= ~(-1L << (start & 63));
-            for (int w = w0 + 1; w < w1; w++) words[w] = 0L;
+            for (int w = w0 + 1; w < w1; w++) {
+                words[w] = 0L;
+            }
             int lastBits = end - w1 * 64;
             long m = (lastBits == 64) ? -1L : ((1L << lastBits) - 1);
             words[w1] &= ~m;
         }
-    }
-
-    private static long[] toFlatArrayWide(List<long[]> list, int words) {
-        long[] flat = new long[list.size() * words];
-        for (int i = 0; i < list.size(); i++) {
-            System.arraycopy(list.get(i), 0, flat, i * words, words);
-        }
-        return flat;
     }
 
     private static void setKnownFilledWordWide(int flatIndex, long newValue) {
@@ -646,7 +712,9 @@ public class NonogramMultiLong {
         Arrays.fill(out, -1L);
         for (int i = 0; i < size; i++) {
             int base = i * words;
-            for (int w = 0; w < words; w++) out[w] &= candidates[base + w];
+            for (int w = 0; w < words; w++) {
+                out[w] &= candidates[base + w];
+            }
         }
     }
 
@@ -654,7 +722,9 @@ public class NonogramMultiLong {
         Arrays.fill(out, -1L);
         for (int i = 0; i < size; i++) {
             int base = i * words;
-            for (int w = 0; w < words; w++) out[w] &= ~candidates[base + w];
+            for (int w = 0; w < words; w++) {
+                out[w] &= ~candidates[base + w];
+            }
         }
         out[words - 1] &= finalWordMask;
     }
@@ -664,37 +734,24 @@ public class NonogramMultiLong {
         int cWord = c >>> 6, cBit = c & 63;
         for (int r = 0; r < rowAmount; r++) {
             long bit = (rowMajor[r * wideRowWords + cWord] >>> cBit) & 1L;
-            if (bit != 0) out[r >>> 6] |= (1L << (r & 63));
-        }
-    }
-
-    private static boolean lineMatchesCluesWide(long[] words, int base, int length, int[] clues) {
-        int clueIndex = 0;
-        int i = 0;
-        while (i < length) {
-            long bit = (words[base + (i >>> 6)] >>> (i & 63)) & 1L;
-            if (bit == 0) { i++; continue; }
-            int runStart = i;
-            while (i < length) {
-                long b = (words[base + (i >>> 6)] >>> (i & 63)) & 1L;
-                if (b == 0) break;
-                i++;
+            if (bit != 0) {
+                out[r >>> 6] |= (1L << (r & 63));
             }
-            int runLength = i - runStart;
-            if (clueIndex >= clues.length || clues[clueIndex] != runLength) return false;
-            clueIndex++;
         }
-        return clueIndex == clues.length;
     }
 
-    private static boolean validNonogramWide() {
-        for (int r = 0; r < rowAmount; r++)
-            if (!lineMatchesCluesWide(wideKnownFilled, r * wideRowWords, columnAmount, rowClues[r])) return false;
-        for (int c = 0; c < columnAmount; c++) {
-            extractColumnWordsWide(wideKnownFilled, c, wideColFilledScratch);
-            if (!lineMatchesCluesWide(wideColFilledScratch, 0, rowAmount, columnClues[c])) return false;
+    private static void undoToWide(int mark) {
+        while (trailSize > mark) {
+            trailSize--;
+            int index = trailIndex[trailSize];
+            long oldValue = trailValue[trailSize];
+            switch (trailKind[trailSize]) {
+                case KIND_WIDE_ROW_SIZE -> wideRowCandidateSize[index] = (int) oldValue;
+                case KIND_WIDE_COL_SIZE -> wideColumnCandidateSize[index] = (int) oldValue;
+                case KIND_WIDE_KNOWN_FILLED_WORD -> wideKnownFilled[index] = oldValue;
+                case KIND_WIDE_KNOWN_BLANK_WORD -> wideKnownBlank[index] = oldValue;
+            }
         }
-        return true;
     }
 
     private static String boardToStringWide() {

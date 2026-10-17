@@ -4,7 +4,6 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.math.BigInteger;
 
 public class DiscoSlow
 {
@@ -45,39 +44,35 @@ public class DiscoSlow
 	    System.out.println(minSteps);
 	}
 
-	out.close();
+		out.close();
     }
 
     private static void countSteps(boolean[][] _field, boolean[][] _steppedOn, int _w, int _h, long _steps)
     {
 	// check if all tiles are lit
 	var allLights = true;
-	for (var y = 0; y < _h; y++)
-	    for (var x = 0; x < _w; x++)
-		if (!_field[x][y])
-			//TODO: loop could be terminated much faster
-			allLights = false;
+	int x = 0;
+	int y = 0;
+	while (allLights && x < _w) {
+		while (allLights && y < _h) {
+			if (!_field[x][y]) {
+				allLights = false;
+			}
+			y++;
+		}
+		x++;
+	}
 
 	if (allLights)
 	{
-	    System.out.println("Found solution with " + _steps + " steps");
-		//TODO: new BigInt
 		if ((minSteps == -1) || (_steps < minSteps))
 		minSteps = _steps;
 	    return;
 	}
 
-	//for (var y = 0; y < _h; y++)
-	//{
-	//    for (var x = 0; x < _w; x++)
-	//	System.out.print(_field[x][y] ? "#" : ".");
-	//    System.out.println();
-	//}
-
-	// pick next step
-	for (var y = 0; y < _h; y++)
-	    for (var x = 0; x < _w; x++)
-		if (!_steppedOn[x][y])
+	for (var i = 0; i < _h; i++)
+	    for (var j = 0; j < _w; j++)
+		if (!_steppedOn[j][i])
 		{
 		    // make copies of the current state
 			//TODO: Copies!!
@@ -92,16 +87,16 @@ public class DiscoSlow
 
 		    // step on field (x,y)
 		    //System.out.println("Step on " + x + "," + y);
-		    _steppedOn[x][y] = true;
-		    _field[x][y] = !_field[x][y];
-		    if (x > 0)
-			_field[x - 1][y] = !_field[x - 1][y];
-		    if (y > 0)
-			_field[x][y - 1] = !_field[x][y - 1];
-		    if (x + 1 < _w)
-			_field[x + 1][y] = !_field[x + 1][y];
-		    if (y + 1 < _h)
-			_field[x][y + 1] = !_field[x][y + 1];
+		    _steppedOn[j][i] = true;
+		    _field[j][i] = !_field[j][i];
+		    if (j > 0)
+			_field[j - 1][i] = !_field[j - 1][i];
+		    if (i > 0)
+			_field[j][i - 1] = !_field[j][i - 1];
+		    if (j + 1 < _w)
+			_field[j + 1][i] = !_field[j + 1][i];
+		    if (i + 1 < _h)
+			_field[j][i + 1] = !_field[j][i + 1];
 
 		    // continue the search, perform more steps
 		    countSteps(_field, _steppedOn, _w, _h, _steps+1);
